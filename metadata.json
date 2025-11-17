@@ -1,0 +1,5 @@
+{
+  "name": "Istanbul Cats: 3D Game Prototype",
+  "description": "A playable prototype of the 3D browser game 'Istanbul Cats'. Features a controllable cat character with running and jumping mechanics in a basic 3D environment.",
+  "requestFramePermissions": []
+}
