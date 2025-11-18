@@ -1,1007 +1,966 @@
 
-
-
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { PlayerControls } from '../types';
 
 // =================================================================================================
-// --- GAME CONSTANTS ------------------------------------------------------------------------------
+// --- CONFIGURATION -------------------------------------------------------------------------------
 // =================================================================================================
-// These constants control the fundamental physics and feel of the game.
-// Tweaking these values can dramatically change the gameplay experience.
 
-const WALK_SPEED = 6;            // Standard movement speed.
-const RUN_SPEED = 10;            // Speed when holding the sprint key.
-const JUMP_FORCE = 12;           // The initial upward velocity of a jump.
-const WALL_JUMP_FORCE = 10;      // The outward force when kicking off a wall.
-const GRAVITY = -35;             // The constant downward acceleration.
-const MAX_JUMPS = 3;             // Allows for a double jump after leaving the ground.
-const MOUSE_SENSITIVITY = 0.002; // Controls how much the camera moves with the mouse.
-
-// Camera constraints to prevent it from going upside down or too low.
-const CAMERA_MIN_PHI = 0.3;      // Minimum vertical angle (radians).
-const CAMERA_MAX_PHI = Math.PI / 2.1; // Maximum vertical angle (radians).
-
-const TOTAL_COLLECTIBLES = 80;   // The total number of fish to collect to win.
-
-// "Game feel" constants for more responsive controls.
-const COYOTE_TIME = 0.1;       // How long you can still jump after running off a ledge (in seconds).
-const JUMP_BUFFER_TIME = 0.1;  // How early you can press jump before landing and have it execute (in seconds).
-
-// Player character's physical dimensions for collision detection.
-const PLAYER_HEIGHT = 0.8;
-const PLAYER_RADIUS = 0.3;
-
-// A curated color palette for the procedurally generated city.
-const CITY_PALETTE = {
-    buildings: [0x8ecae6, 0x219ebc, 0x126782, 0xffb703, 0xfb8500, 0xe76f51, 0xf4a261, 0xe9c46a],
-    roofs: [0xd62828, 0xf77f00, 0x8f2d56, 0x227c9d],
-    ground: 0x90a955,
-    platform: 0x4f772d,
+const CONFIG = {
+    PHYSICS: {
+        GRAVITY: 110,
+        MOVE_SPEED: 50,
+        SPRINT_SPEED: 85,
+        ACCEL: 400,             // Snappy
+        AIR_CONTROL: 120,
+        JUMP_FORCE: 50,
+        VAR_JUMP_TIME: 0.25,
+        FRICTION_GROUND: 25.0, 
+        FRICTION_AIR: 1.0,     
+        PLAYER_RADIUS: 1.1,
+        PLAYER_HEIGHT: 2.2,     // Height of capsule
+        STEP_HEIGHT: 1.2,       // Can step up curbs
+        FIXED_STEP: 1 / 60, 
+        SUBSTEPS: 5             
+    },
+    CAMERA: {
+        FOV: 60,
+        DISTANCE: 30,
+        HEIGHT: 18,
+        SMOOTH: 10.0,
+        LOOK_SMOOTH: 15.0,
+        COLLISION_OFFSET: 1.0
+    },
+    MAP: {
+        SIZE: 24,               // Blocks
+        BLOCK_SIZE: 30,
+        STREET_WIDTH: 18
+    }
 };
 
-
-// =================================================================================================
-// --- TYPES ---------------------------------------------------------------------------------------
-// =================================================================================================
-// Custom type definitions for better code clarity and type safety.
-
-// Represents the state of the player's keyboard inputs.
-type PlayerControls = {
-  forward: boolean; backward: boolean; left: boolean;
-  right: boolean; jump: boolean; sprint: boolean;
+const PALETTE = {
+    skyTop: 0x4CA1FF,       // Bright Day
+    skyBottom: 0xFFF5EE,    // Seashell
+    sun: 0xFFFEFA,
+    ambient: 0x909090,
+    water: 0x0099DD,
+    buildings: [0xFFFFFF, 0xF0F8FF, 0xFAEBD7, 0xFFEFD5, 0xE6E6FA], // White/Pastel washed
+    roofs: [0xB22222, 0xA52A2A, 0x808080], // Red tiles
+    cat: {
+        fur: 0x222222, 
+        socks: 0xFFFFFF,
+        collar: 0xFF0000
+    }
 };
 
-// A structured representation of the player's 3D model components for easy access during animation.
-type PlayerModel = {
-    group: THREE.Group;
-    body: THREE.Mesh;
-    head: THREE.Group;
-    tail: THREE.Group[]; // Array of tail segments for procedural animation.
-    ears: { left: THREE.Mesh; right: THREE.Mesh; };
-    legs: { frontLeft: THREE.Mesh; frontRight: THREE.Mesh; backLeft: THREE.Mesh; backRight: THREE.Mesh; };
+// =================================================================================================
+// --- PROCEDURAL TEXTURES & SHADERS ---------------------------------------------------------------
+// =================================================================================================
+
+function createToonGradient(): THREE.Texture {
+    const colors = new Uint8Array([
+        80, 80, 90, 255,     // Deep Shadow
+        180, 180, 190, 255,  // Soft Shadow
+        255, 255, 255, 255   // Light
+    ]);
+    const texture = new THREE.DataTexture(colors, 3, 1, THREE.RGBAFormat);
+    texture.minFilter = THREE.NearestFilter;
+    texture.magFilter = THREE.NearestFilter;
+    texture.needsUpdate = true;
+    return texture;
+}
+
+function createCobblestoneTexture(): THREE.CanvasTexture {
+    const size = 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    
+    // Base
+    ctx.fillStyle = '#888888';
+    ctx.fillRect(0,0,size,size);
+    
+    // Stones
+    ctx.fillStyle = '#999999';
+    for(let i=0; i<60; i++) {
+        const x = Math.random()*size;
+        const y = Math.random()*size;
+        const w = 20 + Math.random()*30;
+        const h = 15 + Math.random()*20;
+        ctx.beginPath();
+        ctx.roundRect(x,y,w,h, 5);
+        ctx.fill();
+        ctx.strokeStyle = '#666666';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+}
+
+function createBuildingTexture(): THREE.CanvasTexture {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    
+    ctx.fillStyle = '#FDF5E6';
+    ctx.fillRect(0,0,size,size);
+    
+    // Bricks
+    ctx.fillStyle = '#F0E68C';
+    for(let y=0; y<size; y+=20) {
+        const offset = (y/20)%2 === 0 ? 0 : 10;
+        for(let x=-10; x<size; x+=40) {
+            ctx.fillRect(x+offset, y, 35, 15);
+        }
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+}
+
+const WaterShader = {
+    uniforms: {
+        time: { value: 0 },
+        color: { value: new THREE.Color(PALETTE.water) }
+    },
+    vertexShader: `
+        varying vec2 vUv;
+        uniform float time;
+        void main() {
+            vUv = uv;
+            vec3 pos = position;
+            pos.y += sin(pos.x * 0.05 + time) * 1.5;
+            pos.y += cos(pos.z * 0.05 + time) * 1.5;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        }
+    `,
+    fragmentShader: `
+        uniform vec3 color;
+        uniform float time;
+        varying vec2 vUv;
+        void main() {
+            float foam = sin(vUv.x * 20.0 + time*2.0) * sin(vUv.y * 20.0 + time) * 0.1;
+            gl_FragColor = vec4(color + foam, 0.85);
+        }
+    `
 };
 
+function createFaceTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 128;
+    const ctx = canvas.getContext('2d')!;
+
+    const draw = (state: string) => {
+        ctx.clearRect(0, 0, 256, 128);
+        
+        if (state === 'normal' || state === 'happy') {
+            // Eyes
+            ctx.fillStyle = '#000';
+            ctx.beginPath(); ctx.ellipse(70, 64, 18, 35, 0, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(186, 64, 18, 35, 0, 0, Math.PI*2); ctx.fill();
+            
+            // Highlights
+            ctx.fillStyle = '#FFF';
+            ctx.beginPath(); ctx.arc(80, 50, 8, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(196, 50, 8, 0, Math.PI*2); ctx.fill();
+            
+            // Mouth
+            ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(128, 85, 6, 0, Math.PI, false); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(128, 85); ctx.lineTo(128, 75); ctx.stroke();
+        } else if (state === 'blink') {
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 6;
+            ctx.beginPath(); ctx.moveTo(40, 70); ctx.quadraticCurveTo(70, 80, 100, 70); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(156, 70); ctx.quadraticCurveTo(186, 80, 216, 70); ctx.stroke();
+        }
+    };
+
+    const tex = new THREE.CanvasTexture(canvas);
+    draw('normal');
+    return { texture: tex, set: (s: string) => { draw(s); tex.needsUpdate = true; } };
+}
 
 // =================================================================================================
-// --- MAIN GAME CLASS -----------------------------------------------------------------------------
+// --- GAME ENGINE ---------------------------------------------------------------------------------
 // =================================================================================================
-// This class encapsulates all the logic for the 3D game world, including rendering,
-// physics, player control, and game state management.
 
 export class ThreeGame {
-    // --- Core Three.js Properties ---
     private canvas: HTMLCanvasElement;
     private renderer!: THREE.WebGLRenderer;
     private scene!: THREE.Scene;
     private camera!: THREE.PerspectiveCamera;
-    private clock = new THREE.Clock(); // Used to measure time between frames (delta time).
-    private composer!: EffectComposer; // Handles post-processing effects like bloom.
-
-    // --- Player State ---
-    private player!: THREE.Group; // The main container for the player model.
-    private playerModel!: PlayerModel; // The detailed cat model.
-    private playerBoundingBox!: THREE.Box3; // The invisible box used for collision detection.
-    private playerVelocity = new THREE.Vector3(); // Current speed and direction of the player.
-    private onGround = false; // Is the player currently standing on a surface?
-    private jumpCount = 0; // Tracks jumps for double/triple jumping.
+    private composer!: EffectComposer;
+    private clock = new THREE.Clock();
     
-    // --- Advanced Movement State ---
-    private timeSinceGrounded = 0; // Timer for coyote time.
-    private timeSinceJumpPressed = 0; // Timer for jump buffering.
-    private isTouchingWall = false; // Is the player currently colliding with a wall?
-    private wallNormal = new THREE.Vector3(); // The direction away from the wall being touched.
+    // Systems
+    private particleSystem: { mesh: THREE.InstancedMesh, lives: Float32Array, vels: Float32Array, activeCount: number } | null = null;
+    
+    // State
+    private running = false;
+    private frameId = 0;
+    private timeAcc = 0;
+    
+    // Physics
+    private pPos = new THREE.Vector3(0, 5, 0);
+    private pVel = new THREE.Vector3();
+    private pOnGround = false;
+    private pJumpTimer = 0;
+    private pFacing = Math.PI;
+    private pPlatformVelocity = new THREE.Vector3(); // Velocity of platform we are standing on
+    
+    // Visual Interpolation
+    private prevPos = new THREE.Vector3();
+    private prevRot = Math.PI;
+    private animSquash = 1.0;
 
-    // --- World and Game State ---
-    private collidableObjects: THREE.Object3D[] = []; // A list of all objects the player can collide with.
-    private collectibles: THREE.Group[] = []; // A list of all fish in the world.
-    private score = 0; // The player's current score.
+    // Entities
+    private playerGroup!: THREE.Group;
+    private playerParts: any = {};
+    private colliders: THREE.Box3[] = [];
+    private tramGroup!: THREE.Group;
+    private waterMat!: THREE.ShaderMaterial;
+    
+    // Inputs
+    private keys: PlayerControls = { forward: false, backward: false, left: false, right: false, jump: false, sprint: false };
+    private camAngle = { x: 0.3, y: Math.PI };
+    
+    // Callbacks
+    public onScoreUpdate = (s: number, t: number) => {};
+    public onLivesUpdate = (l: number) => {};
+    
+    // Cache
+    private gradientMap: THREE.Texture;
+    private cobbleMap: THREE.Texture;
+    private brickMap: THREE.Texture;
+    
+    private score = 0;
+    private lives = 9;
+    private collectibles: any[] = [];
 
-    // --- Camera Control ---
-    private cameraSpherical = new THREE.Spherical(8, Math.PI / 2.5, Math.PI); // Uses spherical coordinates for easy orbital control.
-    private cameraLookAt = new THREE.Vector3(); // The point the camera is looking at (smoothed).
-    private cameraPosition = new THREE.Vector3(); // The camera's actual position (smoothed).
-    private lookAheadOffset = new THREE.Vector3(); // A small offset to make the camera look where the player is going.
-
-    // --- Input and Control ---
-    private isRunning = false; // Is the game currently active and accepting input?
-    private playerControls: PlayerControls = { forward: false, backward: false, left: false, right: false, jump: false, sprint: false };
-    private prevPlayerControls: PlayerControls = { ...this.playerControls }; // State of controls in the previous frame.
-
-    // --- Animation and Effects ---
-    private animationState: { turnRate: number; phase: string; time: number; } = { turnRate: 0, phase: 'idle', time: 0 };
-    private animationFrameId: number = -1; // The ID of the current animation frame request.
-    private sun!: THREE.DirectionalLight;
-    private ambientLight!: THREE.AmbientLight;
-    private sounds!: { jump: HTMLAudioElement; land: HTMLAudioElement; collect: HTMLAudioElement; wallSlide: HTMLAudioElement; };
-    private particlePool: THREE.Mesh[] = []; // A pool of reusable particle objects for efficiency.
-    private activeParticles: { mesh: THREE.Mesh; lifetime: number; velocity: THREE.Vector3 }[] = [];
-    private audioInitialized = false;
-
-    // --- Callbacks ---
-    // A function passed in from the React component to update the UI with the score.
-    public onScoreUpdate: (score: number, total: number) => void = () => {};
-
-    constructor(canvas: HTMLCanvasElement) { this.canvas = canvas; }
-
-    /**
-     * Initializes the entire game world. This is the main entry point after the class is created.
-     */
-    public init() {
-        this.setupScene();
-        this.setupLights();
-        this.createCityscape();
-        this.setupPlayer();
-        this.setupCollectibles();
-        this.setupEventListeners();
-        this.createParticlePool();
-        this.animate(); // Starts the game loop.
-        this.onScoreUpdate(this.score, TOTAL_COLLECTIBLES);
+    constructor(canvas: HTMLCanvasElement) {
+        this.canvas = canvas;
+        this.gradientMap = createToonGradient();
+        this.cobbleMap = createCobblestoneTexture();
+        this.brickMap = createBuildingTexture();
+        this.init();
     }
-    
-    /**
-     * Sets up the core Three.js components: scene, camera, renderer, and post-processing composer.
-     */
-    private setupScene() {
-        this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x87ceeb); // Sky blue
-        this.scene.fog = new THREE.Fog(0x87ceeb, 50, 200); // Fog for atmospheric perspective.
 
-        this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
-        this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setPixelRatio(window.devicePixelRatio); // For crisp rendering on high-DPI screens.
-        this.renderer.shadowMap.enabled = true; // Enable shadows.
+    private init() {
+        this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance' });
+        this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping; // For more realistic lighting.
-        
-        // Setup post-processing for a bloom (glow) effect.
-        const renderPass = new RenderPass(this.scene, this.camera);
-        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.8, 0.6, 0.7);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(PALETTE.skyTop);
+        this.scene.fog = new THREE.FogExp2(PALETTE.skyTop, 0.006);
+
+        this.camera = new THREE.PerspectiveCamera(CONFIG.CAMERA.FOV, window.innerWidth/window.innerHeight, 0.1, 1000);
+
+        // Post Processing
         this.composer = new EffectComposer(this.renderer);
-        this.composer.addPass(renderPass);
-        this.composer.addPass(bloomPass);
-    }
+        this.composer.addPass(new RenderPass(this.scene, this.camera));
+        this.composer.addPass(new OutputPass());
 
-    /**
-     * Configures the lighting for the scene, including ambient light and a directional sun.
-     */
-    private setupLights() {
-        this.ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
-        this.scene.add(this.ambientLight);
-
-        this.sun = new THREE.DirectionalLight(0xffeeb1, 3.5); // Warm sun color.
-        this.sun.position.set(70, 100, 50);
-        this.sun.castShadow = true;
-        // Configure shadow quality.
-        this.sun.shadow.mapSize.width = 4096; this.sun.shadow.mapSize.height = 4096;
-        const d = 150;
-        this.sun.shadow.camera.left = -d; this.sun.shadow.camera.right = d;
-        this.sun.shadow.camera.top = d; this.sun.shadow.camera.bottom = -d;
-        this.sun.shadow.bias = -0.0005; // Fixes shadow artifacts.
-        this.scene.add(this.sun);
-    }
-    
-     /**
-     * Procedurally generates the entire city, including the ground, starting platform, and all buildings.
-     */
-    private createCityscape() {
-        // Create the ground plane.
-        const ground = new THREE.Mesh(
-            new THREE.PlaneGeometry(500, 500),
-            new THREE.MeshStandardMaterial({ color: CITY_PALETTE.ground })
-        );
-        ground.receiveShadow = true;
-        ground.rotation.x = -Math.PI / 2;
-        this.scene.add(ground);
-        this.collidableObjects.push(ground); // Add ground to physics objects.
+        // Lights
+        const hemi = new THREE.HemisphereLight(PALETTE.skyTop, PALETTE.skyBottom, 0.8);
+        this.scene.add(hemi);
         
-        // Create the central starting platform.
-        const platformGeo = new THREE.BoxGeometry(15, 2, 15);
-        const platformMat = new THREE.MeshStandardMaterial({ color: CITY_PALETTE.platform });
-        const platform = new THREE.Mesh(platformGeo, platformMat);
-        platform.position.y = 1; 
-        platform.receiveShadow = true;
-        platform.castShadow = true;
-        this.scene.add(platform);
-        this.collidableObjects.push(platform);
-    
-        // Generate a grid of buildings.
-        const citySize = 12;
-        const spacing = 14;
-        for (let x = -citySize; x <= citySize; x++) {
-            for (let z = -citySize; z <= citySize; z++) {
-                if (Math.abs(x) < 2 && Math.abs(z) < 2) continue; // Leave space around the center.
-                if (Math.random() > 0.65) continue; // Create some empty lots for variety.
+        const sun = new THREE.DirectionalLight(PALETTE.sun, 1.8);
+        sun.position.set(150, 300, 100);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.left = -300; sun.shadow.camera.right = 300;
+        sun.shadow.camera.top = 300; sun.shadow.camera.bottom = -300;
+        sun.shadow.bias = -0.0004;
+        this.scene.add(sun);
 
-                const buildingGroup = this.createStylizedBuilding();
-                buildingGroup.position.set(
-                    x * spacing + THREE.MathUtils.randFloatSpread(6),
-                    0,
-                    z * spacing + THREE.MathUtils.randFloatSpread(6)
-                );
-                buildingGroup.rotation.y = [0, Math.PI / 2, Math.PI, Math.PI * 1.5][Math.floor(Math.random() * 4)];
-                this.scene.add(buildingGroup);
-
-                // Decompose the building into its individual collidable parts for accurate physics.
-                buildingGroup.updateWorldMatrix(true, true);
-                buildingGroup.traverse((child) => {
-                    if (child.userData.isCollidable) {
-                        this.collidableObjects.push(child);
-                    }
-                });
-            }
-        }
-    }
-    
-    // A small utility function to pick a random element from an array.
-    private pickRandom(arr: any[]) {
-        return arr[Math.floor(Math.random() * arr.length)];
-    }
-
-    /**
-     * Creates a single, stylized building with random features like roofs, ledges, and clutter.
-     * @returns A THREE.Group containing all the meshes for one building.
-     */
-    private createStylizedBuilding(): THREE.Group {
-        const group = new THREE.Group();
-        const buildingColor = this.pickRandom(CITY_PALETTE.buildings);
-        const roofColor = this.pickRandom(CITY_PALETTE.roofs);
-        const mainHeight = THREE.MathUtils.randFloat(8, 30);
-        const mainWidth = THREE.MathUtils.randFloat(6, 12);
-        const mainDepth = THREE.MathUtils.randFloat(6, 12);
-        const mainMat = new THREE.MeshStandardMaterial({
-            color: buildingColor, metalness: 0.1, roughness: 0.8
-        });
-        // The main block of the building.
-        const mainGeo = new THREE.BoxGeometry(mainWidth, mainHeight, mainDepth);
-        mainGeo.translate(0, mainHeight / 2, 0); // Move origin to the base.
-        const mainMesh = new THREE.Mesh(mainGeo, mainMat);
-        mainMesh.castShadow = true;
-        mainMesh.receiveShadow = true;
-        mainMesh.userData.isCollidable = true; // Mark this part as solid for physics.
-        group.add(mainMesh);
-        this.addWindows(mainMesh, mainWidth, mainHeight, mainDepth);
-
-        // Add random rooftop features.
-        if (Math.random() > 0.4) { // Pitched roof
-            const roofHeight = THREE.MathUtils.randFloat(2, 4);
-            const roofGeo = new THREE.ConeGeometry(Math.max(mainWidth, mainDepth) * 0.75, roofHeight, 4); // 4 sides for a pyramid shape.
-            const roofMat = new THREE.MeshStandardMaterial({
-                color: roofColor, metalness: 0.1, roughness: 0.8
-            });
-            const roof = new THREE.Mesh(roofGeo, roofMat);
-            roof.position.y = mainHeight + roofHeight / 2;
-            roof.rotation.y = Math.PI / 4;
-            roof.castShadow = true;
-            group.add(roof);
-        } else { // Flat roof with ledge and clutter
-            const ledgeHeight = 0.5;
-            const ledgeGeo = new THREE.BoxGeometry(mainWidth + 0.5, ledgeHeight, mainDepth + 0.5);
-            const ledgeMat = new THREE.MeshStandardMaterial({ color: 0x555555 });
-            const ledge = new THREE.Mesh(ledgeGeo, ledgeMat);
-            ledge.position.y = mainHeight + ledgeHeight / 2;
-            ledge.userData.isCollidable = true;
-            group.add(ledge);
-
-            if (Math.random() > 0.5) {
-                const clutterHeight = THREE.MathUtils.randFloat(1, 3);
-                const clutterWidth = THREE.MathUtils.randFloat(1, 4);
-                const clutterGeo = new THREE.BoxGeometry(clutterWidth, clutterHeight, clutterWidth);
-                const clutterMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
-                const clutter = new THREE.Mesh(clutterGeo, clutterMat);
-                clutter.position.set(
-                    THREE.MathUtils.randFloatSpread(mainWidth * 0.7),
-                    mainHeight + ledgeHeight + clutterHeight / 2,
-                    THREE.MathUtils.randFloatSpread(mainDepth * 0.7)
-                );
-                clutter.castShadow = true;
-                clutter.userData.isCollidable = true;
-                group.add(clutter);
-            }
-        }
-        return group;
-    }
-
-    /**
-     * Adds simple window planes to the faces of a building mesh for visual detail.
-     */
-    private addWindows(buildingMesh: THREE.Mesh, width: number, height: number, depth: number) {
-        const windowGeo = new THREE.PlaneGeometry(0.8, 1.2);
-        const windowMat = new THREE.MeshStandardMaterial({ color: 0x111827, metalness: 0, roughness: 0.5 });
-    
-        const addWindowsToFace = (faceWidth: number, faceHeight: number, transform: THREE.Matrix4) => {
-            const cols = Math.floor((faceWidth - 2) / 2.2);
-            const rows = Math.floor((faceHeight - 2) / 3);
-            for (let r = 0; r < rows; r++) {
-                for (let c = 0; c < cols; c++) {
-                     if (Math.random() > 0.35) {
-                        const windowMesh = new THREE.Mesh(windowGeo, windowMat);
-                        const x = -faceWidth/2 + 2 + c * 2.2;
-                        const y = 2 + r * 3;
-                        windowMesh.position.set(x, y, 0);
-                        windowMesh.applyMatrix4(transform); // Apply transformation to position on the correct face.
-                        buildingMesh.add(windowMesh);
-                    }
-                }
-            }
-        }
-    
-        // Create transformations for each face of the building.
-        const frontTransform = new THREE.Matrix4().setPosition(0, -height/2, depth/2 + 0.01);
-        addWindowsToFace(width, height, frontTransform);
-    
-        const backTransform = new THREE.Matrix4().makeRotationY(Math.PI).setPosition(0, -height/2, -depth/2 - 0.01);
-        addWindowsToFace(width, height, backTransform);
-    
-        const leftTransform = new THREE.Matrix4().makeRotationY(-Math.PI / 2).setPosition(-width/2 - 0.01, -height/2, 0);
-        addWindowsToFace(depth, height, leftTransform);
+        this.buildWorld();
+        this.buildPlayer();
+        this.initParticles();
         
-        const rightTransform = new THREE.Matrix4().makeRotationY(Math.PI / 2).setPosition(width/2 + 0.01, -height/2, 0);
-        addWindowsToFace(depth, height, rightTransform);
-    }
-    
-    /**
-     * Creates the player object, including its 3D model and collision bounding box.
-     */
-    private setupPlayer() {
-        this.player = new THREE.Group();
-        this.player.position.set(0, 5, 0);
-        this.playerModel = this.createDetailedCatModel();
-        this.playerModel.group.position.y = PLAYER_HEIGHT;
-        this.player.add(this.playerModel.group);
-        this.scene.add(this.player);
-
-        this.playerBoundingBox = new THREE.Box3();
-        this.updatePlayerBoundingBox();
-    }
-    
-     /**
-     * Constructs the detailed 3D model for the cat character.
-     * @returns A PlayerModel object containing references to all parts of the cat.
-     */
-    private createDetailedCatModel(): PlayerModel {
-        const group = new THREE.Group();
-        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4a4a4a, roughness: 0.6 });
-
-        const bodyGeo = new THREE.CapsuleGeometry(0.25, 0.8, 4, 12);
-        const body = new THREE.Mesh(bodyGeo, bodyMat);
-        body.rotation.z = Math.PI / 2;
-        body.castShadow = true;
-        group.add(body);
-
-        const head = new THREE.Group();
-        const headGeo = new THREE.SphereGeometry(0.22, 16, 12);
-        const headMesh = new THREE.Mesh(headGeo, bodyMat);
-        headMesh.position.x = 0.55;
-        headMesh.castShadow = true;
-        head.add(headMesh);
-        group.add(head);
-
-        const earGeo = new THREE.ConeGeometry(0.1, 0.2, 4);
-        const leftEar = new THREE.Mesh(earGeo, bodyMat);
-        leftEar.position.set(0.55, 0.15, 0.15);
-        leftEar.rotation.x = Math.PI / 4;
-        const rightEar = leftEar.clone();
-        rightEar.position.z = -0.15;
-        head.add(leftEar, rightEar);
-
-        // Create a chain of tail segments for procedural animation.
-        const tailSegments: THREE.Group[] = [];
-        let parent: THREE.Group = group;
-        for(let i=0; i<8; i++){
-            const tailPivot = new THREE.Group();
-            const tailGeo = new THREE.CylinderGeometry(0.06 - i * 0.005, 0.05 - i * 0.005, 0.15, 6);
-            const tailSeg = new THREE.Mesh(tailGeo, bodyMat);
-            tailSeg.position.y = 0.075;
-            tailPivot.add(tailSeg)
-            tailPivot.position.y = i === 0 ? 0 : 0.15;
-            parent.add(tailPivot);
-            parent = tailPivot;
-            tailSegments.push(tailPivot);
-        }
-        // Position the base of the tail.
-        group.children[group.children.length - 1].position.set(-0.5, 0.1, 0);
-        group.children[group.children.length - 1].rotation.z = -Math.PI / 4;
-
-        const legGeo = new THREE.CylinderGeometry(0.07, 0.05, 0.5, 8);
-        const frontLeft = new THREE.Mesh(legGeo, bodyMat);
-        frontLeft.position.set(0.3, -0.3, 0.2);
-        const frontRight = frontLeft.clone();
-        frontRight.position.z = -0.2;
-        const backLeft = frontLeft.clone();
-        backLeft.position.x = -0.3;
-        const backRight = backLeft.clone();
-        backRight.position.z = -0.2;
-        [frontLeft, frontRight, backLeft, backRight].forEach(leg => leg.castShadow = true);
-        group.add(frontLeft, frontRight, backLeft, backRight);
-        
-        return { group, body, head, tail: tailSegments, ears: {left: leftEar, right: rightEar}, legs: {frontLeft, frontRight, backLeft, backRight}};
-    }
-
-    /**
-     * Initializes the Web Audio API and loads all sound effects. Called once when the game starts.
-     * FIX: Replaced broken audio URLs with new, reliable ones to fix "no supported sources" error.
-     */
-    private initAudio() {
-        if(this.audioInitialized) return;
-        this.sounds = {
-            jump: new Audio('https://gdm-catalog-fmapi-prod.imgix.net/Node_user_80/Sound_Effect_e77a970e-e284-4864-a82f-57ab718a3563.wav'),
-            land: new Audio('https://gdm-catalog-fmapi-prod.imgix.net/Node_user_80/Sound_Effect_4e409395-5858-47a3-8640-520e55def739.wav'),
-            collect: new Audio('https://gdm-catalog-fmapi-prod.imgix.net/Node_user_80/Sound_Effect_1e18d63a-237c-486b-a8f8-3f11818b29f7.wav'),
-            wallSlide: new Audio('https://gdm-catalog-fmapi-prod.imgix.net/Node_user_80/Sound_Effect_f222b39f-155e-4513-88a4-0a37ad9235d2.wav'),
-        };
-        Object.values(this.sounds).forEach(sound => { sound.volume = 0.3; });
-        this.sounds.wallSlide.loop = true;
-        this.audioInitialized = true;
-    }
-
-    /**
-     * Creates and places all the collectible fish throughout the city on random rooftops.
-     */
-    private setupCollectibles() {
-        const fishGeo = new THREE.SphereGeometry(0.3, 8, 6);
-        const fishMat = new THREE.MeshStandardMaterial({
-            color: 0x0ea5e9, emissive: 0x0ea5e9, emissiveIntensity: 2, roughness: 0.2
-        });
-
-        for (let i = 0; i < TOTAL_COLLECTIBLES; i++) {
-            const fish = new THREE.Mesh(fishGeo, fishMat);
-            const collectibleGroup = new THREE.Group();
-            collectibleGroup.add(fish);
-
-            // Find a random building part to place the fish on top of.
-            const building = this.collidableObjects[Math.floor(Math.random() * (this.collidableObjects.length -1)) + 1];
-            if(!building) continue;
-            const buildingBox = new THREE.Box3().setFromObject(building);
-            const buildingSize = new THREE.Vector3();
-            buildingBox.getSize(buildingSize);
-
-            collectibleGroup.position.set(
-                building.position.x + THREE.MathUtils.randFloatSpread(buildingSize.x * 0.8),
-                buildingBox.max.y + 0.5,
-                building.position.z + THREE.MathUtils.randFloatSpread(buildingSize.z * 0.8)
-            );
-
-            this.scene.add(collectibleGroup);
-            this.collectibles.push(collectibleGroup);
-        }
-    }
-
-    /**
-     * Binds all necessary event listeners for window resizing and mouse movement.
-     */
-    private setupEventListeners() {
-        window.addEventListener('resize', this.onWindowResize);
+        window.addEventListener('resize', this.onResize);
+        this.canvas.addEventListener('click', () => { if(this.running) this.canvas.requestPointerLock(); });
         document.addEventListener('mousemove', this.onMouseMove);
-        document.addEventListener('pointerlockerror', this.onPointerLockError);
-    }
-    
-    /**
-     * The main update function, called every frame by `animate`.
-     * It orchestrates all per-frame updates.
-     * @param dt Delta time - the time in seconds since the last frame.
-     */
-    private update = (dt: number) => {
-        this.updateTimers(dt);
-        this.handlePlayerMovement(dt);
-        this.applyPhysicsAndCollisions(dt);
-        this.checkCollectibleCollisions();
-        this.updateWorld(dt);
-        this.updateCamera(dt);
-        this.updatePlayerAnimations(dt);
-        this.updateParticles(dt);
-        this.prevPlayerControls = { ...this.playerControls };
-    };
-    
-    /**
-     * Updates timers used for coyote time and jump buffering.
-     */
-    private updateTimers(dt: number) {
-        this.timeSinceGrounded += dt;
-        this.timeSinceJumpPressed += dt;
-        // Reset jump pressed timer on a new key press.
-        if (this.playerControls.jump && !this.prevPlayerControls.jump) {
-            this.timeSinceJumpPressed = 0;
-        }
+
+        this.clock.start();
+        this.loop();
     }
 
-    /**
-     * Calculates player velocity based on keyboard input and camera direction.
-     */
-    private handlePlayerMovement(dt: number) {
-        if (!this.isRunning) { // If the game is paused, gradually slow down.
-            this.playerVelocity.x = THREE.MathUtils.damp(this.playerVelocity.x, 0, 8, dt);
-            this.playerVelocity.z = THREE.MathUtils.damp(this.playerVelocity.z, 0, 8, dt);
-            return;
-        }
+    // =============================================================================================
+    // --- WORLD GENERATION ------------------------------------------------------------------------
+    // =============================================================================================
 
-        // Get camera direction, ignoring vertical component.
-        const cameraForward = new THREE.Vector3();
-        this.camera.getWorldDirection(cameraForward);
-        cameraForward.y = 0;
-        cameraForward.normalize();
-        
-        // Calculate the right vector relative to the camera.
-        const cameraRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), cameraForward).normalize();
+    private buildWorld() {
+        const { SIZE, BLOCK_SIZE, STREET_WIDTH } = CONFIG.MAP;
+        const fullSize = SIZE * (BLOCK_SIZE + STREET_WIDTH);
 
-        const forwardInput = (this.playerControls.forward ? 1 : 0) - (this.playerControls.backward ? 1 : 0);
-        const rightInput = (this.playerControls.right ? 1 : 0) - (this.playerControls.left ? 1 : 0);
-
-        // Combine inputs and camera vectors to get the final movement direction.
-        const moveDir = new THREE.Vector3()
-            .addScaledVector(cameraForward, forwardInput)
-            .addScaledVector(cameraRight, rightInput);
-        
-        const speed = this.playerControls.sprint ? RUN_SPEED : WALK_SPEED;
-        
-        if (moveDir.lengthSq() > 0.01) { // If there is movement input...
-            moveDir.normalize();
-            const targetVelX = moveDir.x * speed;
-            const targetVelZ = moveDir.z * speed;
-            // Smoothly damp the current velocity towards the target velocity.
-            this.playerVelocity.x = THREE.MathUtils.damp(this.playerVelocity.x, targetVelX, this.onGround ? 8 : 4, dt);
-            this.playerVelocity.z = THREE.MathUtils.damp(this.playerVelocity.z, targetVelZ, this.onGround ? 8 : 4, dt);
-            
-            // Smoothly rotate the player model to face the movement direction.
-            const targetAngle = Math.atan2(moveDir.x, moveDir.z);
-            let angleDiff = THREE.MathUtils.radToDeg(targetAngle) - THREE.MathUtils.radToDeg(this.player.rotation.y);
-            angleDiff = (angleDiff + 180) % 360 - 180; // Clamp to [-180, 180]
-            
-            this.animationState.turnRate = THREE.MathUtils.damp(this.animationState.turnRate, THREE.MathUtils.degToRad(angleDiff) * 10, 10, dt);
-            this.player.rotation.y += this.animationState.turnRate * dt;
-        } else { // If no movement input, gradually slow down.
-             this.playerVelocity.x = THREE.MathUtils.damp(this.playerVelocity.x, 0, this.onGround ? 10 : 2, dt);
-             this.playerVelocity.z = THREE.MathUtils.damp(this.playerVelocity.z, 0, this.onGround ? 10 : 2, dt);
-             this.animationState.turnRate = THREE.MathUtils.damp(this.animationState.turnRate, 0, 10, dt);
-        }
-        
-        // --- JUMP LOGIC ---
-        // Check if the jump button was recently pressed.
-        if (this.timeSinceJumpPressed < JUMP_BUFFER_TIME) {
-            // Check for coyote time or if the player is on the ground.
-            if(this.timeSinceGrounded < COYOTE_TIME && this.jumpCount < MAX_JUMPS) {
-                 this.performJump();
-            } else if (this.isTouchingWall) { // Check for wall jump.
-                this.performWallJump();
-            }
-        }
-
-        // --- PARTICLE EMISSION ---
-        if (this.playerControls.sprint && this.onGround && moveDir.lengthSq() > 0.1) {
-            this.emitSprintParticle();
-        }
-        if (this.isTouchingWall && !this.onGround && this.playerVelocity.y < 0) {
-             this.emitWallSlideParticle();
-        }
-    }
-    
-    private performJump() {
-        this.timeSinceJumpPressed = JUMP_BUFFER_TIME; // Consume the buffered jump press.
-        this.playerVelocity.y = JUMP_FORCE;
-        this.jumpCount++;
-        this.onGround = false;
-        this.animationState.phase = 'jumping';
-        this.animationState.time = 0;
-        this.sounds?.jump.play();
-    }
-    
-    private performWallJump() {
-        this.timeSinceJumpPressed = JUMP_BUFFER_TIME; // Consume jump press.
-        this.playerVelocity.y = JUMP_FORCE * 0.9;
-        this.playerVelocity.x = this.wallNormal.x * WALL_JUMP_FORCE;
-        this.playerVelocity.z = this.wallNormal.z * WALL_JUMP_FORCE;
-        this.jumpCount = 1; // Wall jump always resets to the first jump.
-        this.sounds?.jump.play();
-        this.emitParticleBurst(this.player.position, 10, 0xaaaaaa);
-    }
-
-    /**
-     * Applies gravity and handles collisions with the world.
-     */
-    private applyPhysicsAndCollisions(dt: number) {
-        const wasOnGround = this.onGround;
-        
-        // Apply gravity. Reduce gravity when sliding on a wall.
-        if (this.isTouchingWall && this.playerVelocity.y < 0 && !this.onGround) {
-            this.playerVelocity.y += GRAVITY * dt * 0.2; // Wall slide friction.
-        } else {
-            this.playerVelocity.y += GRAVITY * dt;
-        }
-
-        // Move and check collisions on each axis separately.
-        this.player.position.x += this.playerVelocity.x * dt;
-        this.checkCollisions('x');
-        this.player.position.z += this.playerVelocity.z * dt;
-        this.checkCollisions('z');
-        this.player.position.y += this.playerVelocity.y * dt;
-        this.checkCollisions('y');
-        
-        // Handle landing logic.
-        if (this.onGround) {
-            if (this.playerVelocity.y <= 0) {
-              if (!wasOnGround) { // If we just landed this frame...
-                  this.animationState.phase = 'landing';
-                  this.animationState.time = 0;
-                  this.sounds?.land.play();
-                  this.emitParticleBurst(this.player.position, 5, 0xaaaaaa);
-              }
-              this.playerVelocity.y = 0;
-              this.jumpCount = 0; // Reset jumps on landing.
-              this.timeSinceGrounded = 0; // Reset coyote time timer.
-            }
-        }
-    }
-    
-    /**
-     * Checks for and resolves collisions between the player and the world on a given axis.
-     * @param axis The axis ('x', 'y', or 'z') to check for collisions.
-     */
-    private checkCollisions(axis: 'x' | 'y' | 'z') {
-        this.updatePlayerBoundingBox();
-        const playerBox = this.playerBoundingBox;
-    
-        // --- VERTICAL COLLISION (Y-AXIS) ---
-        if (axis === 'y') {
-            this.onGround = false;
-            let highestSurfaceY = -Infinity;
-    
-            // Check for ground collision only when moving down.
-            if (this.playerVelocity.y <= 0) {
-                for (const object of this.collidableObjects) {
-                    const objectBox = new THREE.Box3().setFromObject(object);
-                    if (playerBox.intersectsBox(objectBox)) {
-                        // Check if we are coming from above and just penetrating the top surface.
-                        if (playerBox.min.y < objectBox.max.y && playerBox.max.y > objectBox.max.y) {
-                            // Keep track of the highest surface we are touching.
-                            if (objectBox.max.y > highestSurfaceY) {
-                                highestSurfaceY = objectBox.max.y;
-                            }
-                        }
-                    }
-                }
-                // If we found a valid ground surface, snap the player to it.
-                if (highestSurfaceY > -Infinity) {
-                    this.player.position.y = highestSurfaceY;
-                    this.playerVelocity.y = 0;
-                    this.onGround = true;
-                }
-            } else { // Player is moving up (check for ceiling collision).
-                for (const object of this.collidableObjects) {
-                    const objectBox = new THREE.Box3().setFromObject(object);
-                    if (playerBox.intersectsBox(objectBox) && playerBox.max.y > objectBox.min.y && playerBox.min.y < objectBox.min.y) {
-                        this.player.position.y = objectBox.min.y - PLAYER_HEIGHT;
-                        this.playerVelocity.y = 0;
-                        return; // Exit after first ceiling hit.
-                    }
-                }
-            }
-            return;
-        }
-    
-        // --- HORIZONTAL COLLISION (X and Z AXES) ---
-        this.isTouchingWall = false;
-        for (const object of this.collidableObjects) {
-            const objectBox = new THREE.Box3().setFromObject(object);
-            if (playerBox.intersectsBox(objectBox)) {
-                const intersection = new THREE.Box3().copy(playerBox).intersect(objectBox);
-                const size = new THREE.Vector3();
-                intersection.getSize(size);
-    
-                // Ignore shallow intersections that are likely floor/ceiling collisions.
-                if (size.y > size.x && size.y > size.z) continue;
-    
-                // Resolve the collision by pushing the player out of the object.
-                if (axis === 'x') {
-                    const direction = this.playerVelocity.x > 0 ? -1 : 1;
-                    this.player.position.x += size.x * direction;
-                    this.wallNormal.set(direction, 0, 0); // Store the normal for wall jumps.
-                } else { // z
-                    const direction = this.playerVelocity.z > 0 ? -1 : 1;
-                    this.player.position.z += size.z * direction;
-                    this.wallNormal.set(0, 0, direction);
-                }
-                this.playerVelocity[axis] = 0; // Stop movement into the wall.
-                this.isTouchingWall = true;
-                return; // Resolve one wall collision per axis per frame.
-            }
-        }
-    }
-    
-    /**
-     * Updates the player's bounding box to match its current position.
-     */
-    private updatePlayerBoundingBox() {
-        const playerPosition = this.player.position.clone();
-        playerPosition.y += PLAYER_HEIGHT / 2; // Center the box on the player.
-        this.playerBoundingBox.setFromCenterAndSize(
-            playerPosition,
-            new THREE.Vector3(PLAYER_RADIUS * 2, PLAYER_HEIGHT, PLAYER_RADIUS * 2)
-        );
-    }
-
-    /**
-     * Updates the camera's position and orientation to smoothly follow the player.
-     */
-    private updateCamera(dt: number) {
-        // Calculate the target camera position based on spherical coordinates.
-        const targetPosition = new THREE.Vector3().setFromSpherical(this.cameraSpherical).add(this.player.position);
-        
-        // Raycast from the player to the camera to check for obstacles.
-        const raycaster = new THREE.Raycaster(this.player.position, targetPosition.clone().sub(this.player.position).normalize());
-        const intersects = raycaster.intersectObjects(this.collidableObjects, true);
-        if (intersects.length > 0 && intersects[0].distance < this.cameraSpherical.radius) {
-            // If there's an obstacle, move the camera in front of it.
-            targetPosition.copy(intersects[0].point).addScaledVector(raycaster.ray.direction, -0.5);
-        }
-
-        // Smoothly damp the current camera position towards the target.
-        this.cameraPosition.x = THREE.MathUtils.damp(this.cameraPosition.x, targetPosition.x, 4, dt);
-        this.cameraPosition.y = THREE.MathUtils.damp(this.cameraPosition.y, targetPosition.y, 4, dt);
-        this.cameraPosition.z = THREE.MathUtils.damp(this.cameraPosition.z, targetPosition.z, 4, dt);
-        this.camera.position.copy(this.cameraPosition);
-        
-        // "Look ahead" logic: shift the camera's focus point in the direction of movement.
-        const lookAheadTarget = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z).normalize().multiplyScalar(2);
-        this.lookAheadOffset.lerp(lookAheadTarget, 5 * dt);
-
-        const lookAtTarget = this.player.position.clone().add(new THREE.Vector3(0, PLAYER_HEIGHT, 0)).add(this.lookAheadOffset);
-        this.cameraLookAt.lerp(lookAtTarget, 10 * dt); // Smoothly interpolate the look-at point.
-        this.camera.lookAt(this.cameraLookAt);
-    }
-
-    /**
-     * Updates the player model's animations based on its current state (running, jumping, etc.).
-     */
-    private updatePlayerAnimations(dt: number) {
-        this.animationState.time += dt;
-        const speed = new THREE.Vector2(this.playerVelocity.x, this.playerVelocity.z).length();
-        
-        if (this.animationState.phase === 'landing' && this.animationState.time > 0.2) {
-            this.animationState.phase = 'idle';
-        }
-
-        const wasWallSliding = this.animationState.phase === 'wall_sliding';
-
-        // --- State Machine ---
-        // Determine the current animation phase based on player state.
-        if (!this.onGround) {
-            if(this.isTouchingWall && this.playerVelocity.y < 0) {
-                this.animationState.phase = 'wall_sliding';
-                if(!wasWallSliding) this.sounds?.wallSlide.play();
-            } else if (this.playerVelocity.y > 0) {
-                 this.animationState.phase = 'jumping';
-            } else {
-                 this.animationState.phase = 'falling';
-            }
-        } else if (this.onGround && this.animationState.phase !== 'landing') {
-             if (speed > 1) {
-                this.animationState.phase = 'running';
-            } else {
-                this.animationState.phase = 'idle';
-            }
-        }
-        
-        // Stop the wall slide sound when not sliding.
-        if (wasWallSliding && this.animationState.phase !== 'wall_sliding') {
-             this.sounds?.wallSlide.pause();
-             if(this.sounds?.wallSlide) this.sounds.wallSlide.currentTime = 0;
-        }
-
-        // --- Apply Animations ---
-        const sine = Math.sin(this.animationState.time * (this.playerControls.sprint ? 20 : 15));
-        
-        switch(this.animationState.phase) {
-            case 'idle':
-                this.playerModel.body.position.y = Math.sin(this.animationState.time) * 0.02; // Idle breathing.
-                break;
-            case 'running': // Simple procedural run cycle.
-                this.playerModel.legs.frontLeft.rotation.x = sine * 0.5;
-                this.playerModel.legs.frontRight.rotation.x = -sine * 0.5;
-                this.playerModel.legs.backLeft.rotation.x = -sine * 0.5;
-                this.playerModel.legs.backRight.rotation.x = sine * 0.5;
-                break;
-            case 'jumping': case 'falling': // Stretch effect.
-                 this.playerModel.body.scale.y = THREE.MathUtils.lerp(this.playerModel.body.scale.y, 1.1, 15 * dt);
-                 break;
-            case 'landing': // Squash effect.
-                this.playerModel.body.scale.y = THREE.MathUtils.lerp(this.playerModel.body.scale.y, 0.7, 20 * dt);
-                break;
-        }
-
-        // Return to normal scale after squash/stretch.
-        if(this.animationState.phase !== 'jumping' && this.animationState.phase !== 'landing' && this.animationState.phase !== 'falling') {
-            this.playerModel.body.scale.y = THREE.MathUtils.lerp(this.playerModel.body.scale.y, 1, 10 * dt);
-        }
-        
-        // --- Procedural Tail and Ear Animation ---
-        // Animate the tail based on movement speed and turning rate.
-        this.playerModel.tail.forEach((seg, i) => {
-            const angle = Math.sin(this.animationState.time * 2 + i * 0.5) * (0.1 + speed * 0.02);
-            seg.rotation.z = THREE.MathUtils.lerp(seg.rotation.z, angle - this.animationState.turnRate * 0.1, 5 * dt);
-            seg.rotation.x = THREE.MathUtils.lerp(seg.rotation.x, -this.animationState.turnRate * 0.5, 5*dt);
+        // 1. Pavement (Ground)
+        const groundGeo = new THREE.PlaneGeometry(fullSize + 400, fullSize + 400);
+        const groundMat = new THREE.MeshToonMaterial({ 
+            map: this.cobbleMap, 
+            color: 0xBBBBBB,
+            gradientMap: this.gradientMap 
         });
+        this.cobbleMap.repeat.set(40, 40);
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI/2;
+        ground.receiveShadow = true;
+        this.scene.add(ground);
+        this.colliders.push(new THREE.Box3().setFromObject(ground));
+
+        // 2. Sea
+        this.waterMat = new THREE.ShaderMaterial(WaterShader);
+        this.waterMat.transparent = true;
+        const sea = new THREE.Mesh(new THREE.PlaneGeometry(1500, 1500, 64, 64), this.waterMat);
+        sea.rotation.x = -Math.PI/2;
+        sea.position.y = -4;
+        this.scene.add(sea);
+
+        // 3. Instanced Props (Optimized)
+        const propGeo = new THREE.CylinderGeometry(1, 1, 1.5, 8);
+        const propMat = new THREE.MeshToonMaterial({ color: 0x8B4513, gradientMap: this.gradientMap });
+        const iChairs = new THREE.InstancedMesh(propGeo, propMat, 2000);
+        iChairs.castShadow = true; iChairs.receiveShadow = true;
+        this.scene.add(iChairs);
         
-        // Subtle ear twitching.
-        this.playerModel.ears.left.rotation.y = Math.sin(this.animationState.time * 0.7) * 0.1;
-        this.playerModel.ears.right.rotation.y = Math.sin(this.animationState.time * 0.7 + Math.PI/2) * -0.1;
+        let idxChair = 0;
+        const dummy = new THREE.Object3D();
+
+        // 4. City Grid
+        for(let x=-SIZE/2; x<SIZE/2; x++) {
+            for(let z=-SIZE/2; z<SIZE/2; z++) {
+                if(Math.abs(x) < 2 && Math.abs(z) < 2) continue; // Spawn
+
+                const cx = x * (BLOCK_SIZE + STREET_WIDTH);
+                const cz = z * (BLOCK_SIZE + STREET_WIDTH);
+                const isMainStreet = Math.abs(z) <= 1;
+
+                // Curb/Sidewalk
+                const sidewalk = new THREE.Mesh(
+                    new THREE.BoxGeometry(BLOCK_SIZE, 0.6, BLOCK_SIZE),
+                    new THREE.MeshToonMaterial({ color: 0xDDDDDD, gradientMap: this.gradientMap })
+                );
+                sidewalk.position.set(cx, 0.3, cz);
+                sidewalk.receiveShadow = true;
+                this.scene.add(sidewalk);
+                // Collision for step-up handled by offset logic, but add to physics
+                this.colliders.push(new THREE.Box3().setFromObject(sidewalk));
+
+                // Building
+                const height = isMainStreet ? 30 + Math.random()*30 : 12 + Math.random()*15;
+                const width = BLOCK_SIZE - 4;
+                const color = PALETTE.buildings[Math.floor(Math.random() * PALETTE.buildings.length)];
+                const roofColor = PALETTE.roofs[Math.floor(Math.random() * PALETTE.roofs.length)];
+                
+                // Main block
+                const buildMat = new THREE.MeshToonMaterial({ color: color, map: this.brickMap, gradientMap: this.gradientMap });
+                const b = new THREE.Mesh(new THREE.BoxGeometry(width, height, width), buildMat);
+                b.position.set(cx, height/2 + 0.6, cz);
+                b.castShadow = true; b.receiveShadow = true;
+                this.scene.add(b);
+                this.colliders.push(new THREE.Box3().setFromObject(b));
+
+                // Roof
+                const roof = new THREE.Mesh(new THREE.ConeGeometry(width*0.8, 6, 4), new THREE.MeshToonMaterial({ color: roofColor, gradientMap: this.gradientMap }));
+                roof.position.set(cx, height + 3.6, cz);
+                roof.rotation.y = Math.PI/4;
+                this.scene.add(roof);
+
+                // Simit (Collectible)
+                if(Math.random() > 0.85) {
+                    this.spawnSimit(cx, height + 2, cz);
+                }
+
+                // Chairs
+                if(isMainStreet && idxChair < 1900) {
+                    for(let k=0; k<4; k++) {
+                        dummy.position.set(cx + (Math.random()-0.5)*BLOCK_SIZE, 0.75 + 0.6, cz + (Math.random()-0.5)*BLOCK_SIZE);
+                        dummy.scale.setScalar(1);
+                        dummy.updateMatrix();
+                        iChairs.setMatrixAt(idxChair++, dummy.matrix);
+                    }
+                }
+            }
+        }
+
+        this.buildTram();
     }
-    
-    /**
-     * Checks if the player is close enough to any collectibles and collects them.
-     */
-    private checkCollectibleCollisions() {
-        for (let i = this.collectibles.length - 1; i >= 0; i--) {
-            const collectible = this.collectibles[i];
-            if (this.player.position.distanceTo(collectible.position) < 1.5) {
-                this.scene.remove(collectible);
-                this.collectibles.splice(i, 1);
+
+    private buildTram() {
+        this.tramGroup = new THREE.Group();
+        
+        // Body
+        const body = new THREE.Mesh(new THREE.BoxGeometry(8, 7, 24), new THREE.MeshToonMaterial({ color: 0xD32F2F, gradientMap: this.gradientMap }));
+        body.position.y = 4;
+        body.castShadow = true;
+        
+        // Roof
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(8.4, 0.5, 26), new THREE.MeshToonMaterial({ color: 0xFFFFFF, gradientMap: this.gradientMap }));
+        roof.position.y = 7.5;
+        
+        // Wheels
+        const wGeo = new THREE.CylinderGeometry(1, 1, 8.2, 16);
+        const wMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        const w1 = new THREE.Mesh(wGeo, wMat); w1.rotation.z = Math.PI/2; w1.position.set(0, 1, 8);
+        const w2 = new THREE.Mesh(wGeo, wMat); w2.rotation.z = Math.PI/2; w2.position.set(0, 1, -8);
+
+        this.tramGroup.add(body, roof, w1, w2);
+        this.scene.add(this.tramGroup);
+    }
+
+    private spawnSimit(x: number, y: number, z: number) {
+        const geo = new THREE.TorusGeometry(1.2, 0.4, 8, 16);
+        const mat = new THREE.MeshToonMaterial({ color: 0xFFA500, emissive: 0xCC6600, gradientMap: this.gradientMap });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(x, y, z);
+        this.scene.add(mesh);
+        this.collectibles.push({ mesh, active: true, baseY: y });
+        this.onScoreUpdate(0, this.collectibles.length);
+    }
+
+    private initParticles() {
+        const geo = new THREE.SphereGeometry(0.4, 4, 4);
+        const mat = new THREE.MeshBasicMaterial({ color: 0xFFFFFF, transparent: true, opacity: 0.6 });
+        this.particleSystem = {
+            mesh: new THREE.InstancedMesh(geo, mat, 200),
+            lives: new Float32Array(200),
+            vels: new Float32Array(200 * 3),
+            activeCount: 0
+        };
+        this.particleSystem.mesh.count = 0;
+        this.scene.add(this.particleSystem.mesh);
+    }
+
+    private spawnDust(pos: THREE.Vector3, count: number) {
+        if(!this.particleSystem) return;
+        const { mesh, lives, vels } = this.particleSystem;
+        const dummy = new THREE.Object3D();
+        
+        let spawned = 0;
+        for(let i=0; i<200 && spawned<count; i++) {
+            if(lives[i] <= 0) {
+                lives[i] = 1.0; // Life
+                dummy.position.copy(pos).add(new THREE.Vector3((Math.random()-0.5)*2, 0.5, (Math.random()-0.5)*2));
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+                
+                vels[i*3] = (Math.random()-0.5) * 5;
+                vels[i*3+1] = Math.random() * 5;
+                vels[i*3+2] = (Math.random()-0.5) * 5;
+                spawned++;
+            }
+        }
+        mesh.count = 200;
+        mesh.instanceMatrix.needsUpdate = true;
+    }
+
+    // =============================================================================================
+    // --- PLAYER MODEL (CHIBI CAT) ----------------------------------------------------------------
+    // =============================================================================================
+
+    private buildPlayer() {
+        this.playerGroup = new THREE.Group();
+        const furMat = new THREE.MeshToonMaterial({ color: PALETTE.cat.fur, gradientMap: this.gradientMap });
+        const sockMat = new THREE.MeshToonMaterial({ color: PALETTE.cat.socks, gradientMap: this.gradientMap });
+        const scale = 2.5;
+
+        const visuals = new THREE.Group();
+        visuals.scale.setScalar(scale);
+
+        // 1. Body (Round Capsule)
+        const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 0.8, 4, 8), furMat);
+        body.rotation.x = Math.PI/2;
+        body.position.y = 0.55;
+        body.castShadow = true;
+        visuals.add(body);
+
+        // 2. Head (Oversized Sphere)
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.6, 32, 32), furMat);
+        head.scale.set(1.1, 0.9, 0.9);
+        head.position.set(0, 1.1, 0.4);
+        head.castShadow = true;
+        visuals.add(head);
+
+        // 3. Face (Canvas Texture)
+        const fData = createFaceTexture();
+        this.playerParts.face = fData;
+        const facePlane = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.35), new THREE.MeshBasicMaterial({ map: fData.texture, transparent: true }));
+        facePlane.position.set(0, 0.1, 0.55);
+        facePlane.rotation.x = -0.1;
+        facePlane.renderOrder = 5;
+        head.add(facePlane);
+
+        // 4. Whiskers
+        const wMat = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 });
+        const wGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0.4, 0.1, 0)]);
+        for(let i=0; i<3; i++) {
+            const wL = new THREE.Line(wGeo, wMat);
+            wL.position.set(0.2, 0 - i*0.05, 0.45);
+            wL.rotation.z = 0.2 + i*0.2;
+            const wR = new THREE.Line(wGeo, wMat);
+            wR.position.set(-0.2, 0 - i*0.05, 0.45);
+            wR.rotation.z = Math.PI - (0.2 + i*0.2);
+            head.add(wL, wR);
+        }
+
+        // 5. Ears
+        const earGeo = new THREE.ConeGeometry(0.2, 0.4, 4);
+        const earInGeo = new THREE.ConeGeometry(0.12, 0.3, 4);
+        const earInMat = new THREE.MeshBasicMaterial({ color: 0xFFAAAA });
+        
+        const eL = new THREE.Mesh(earGeo, furMat); eL.position.set(0.35, 0.5, 0); eL.rotation.set(-0.2, 0, -0.4);
+        const eLi = new THREE.Mesh(earInGeo, earInMat); eLi.position.set(0.35, 0.48, 0.05); eLi.rotation.set(-0.2, 0, -0.4);
+        
+        const eR = new THREE.Mesh(earGeo, furMat); eR.position.set(-0.35, 0.5, 0); eR.rotation.set(-0.2, 0, 0.4);
+        const eRi = new THREE.Mesh(earInGeo, earInMat); eRi.position.set(-0.35, 0.48, 0.05); eRi.rotation.set(-0.2, 0, 0.4);
+        head.add(eL, eLi, eR, eRi);
+
+        // 6. Collar
+        const collar = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.05, 8, 24), new THREE.MeshToonMaterial({ color: PALETTE.cat.collar }));
+        collar.rotation.x = Math.PI/2;
+        collar.position.set(0, -0.35, -0.1);
+        head.add(collar);
+        const bell = new THREE.Mesh(new THREE.SphereGeometry(0.1), new THREE.MeshStandardMaterial({ color: 0xFFD700, metalness: 0.8, roughness: 0.2 }));
+        bell.position.set(0, -0.45, 0.25);
+        head.add(bell);
+
+        // 7. Legs (Socks)
+        const legGeo = new THREE.CapsuleGeometry(0.14, 0.4, 4, 8);
+        const fl = new THREE.Mesh(legGeo, sockMat);
+        const fr = new THREE.Mesh(legGeo, sockMat);
+        const bl = new THREE.Mesh(legGeo, sockMat);
+        const br = new THREE.Mesh(legGeo, sockMat);
+        visuals.add(fl, fr, bl, br);
+        this.playerParts.limbs = { fl, fr, bl, br };
+
+        // 8. Tail (Verlet-ish Chain)
+        const tail = new THREE.Group();
+        for(let i=0; i<7; i++) {
+            const s = new THREE.Mesh(new THREE.SphereGeometry(0.12 - i*0.01), furMat);
+            s.position.z = -i * 0.15;
+            tail.add(s);
+        }
+        tail.position.set(0, 0.6, -0.4);
+        visuals.add(tail);
+        this.playerParts.tail = tail;
+
+        this.playerParts.root = visuals;
+        this.playerGroup.add(visuals);
+        this.scene.add(this.playerGroup);
+
+        // Shadow Blob
+        const shadowTex = new THREE.TextureLoader().load('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAAZQTFRFAAAAAAAA5wsO0AAAAAJ0Uk5T/wDltzBKAAAAKElEQVR42mJgGAWjYBSMglEwCkbBSMEYBCMN08CjYBSMglEwCkYBDQAIMABmsAEx2fXQ6wAAAABJRU5ErkJggg==');
+        const shadow = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 2.5), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.4, map: shadowTex }));
+        shadow.rotation.x = -Math.PI/2;
+        this.playerParts.shadow = shadow;
+        this.scene.add(shadow);
+    }
+
+    // =============================================================================================
+    // --- PHYSICS ENGINE V5 (PLATFORMER) ----------------------------------------------------------
+    // =============================================================================================
+
+    private loop = () => {
+        this.frameId = requestAnimationFrame(this.loop);
+        const dt = Math.min(this.clock.getDelta(), 0.1);
+        this.timeAcc += dt;
+        const step = CONFIG.PHYSICS.FIXED_STEP;
+
+        // Water Animation
+        if(this.waterMat) this.waterMat.uniforms.time.value += dt;
+
+        while(this.timeAcc >= step) {
+            if(this.running) {
+                this.updatePhysicsFixed(step);
+                this.updateEntities(step);
+            } else {
+                this.rotateAttractCam(step);
+            }
+            this.timeAcc -= step;
+        }
+        
+        this.updateParticles(dt);
+        this.render(dt);
+    }
+
+    private updatePhysicsFixed(dt: number) {
+        // 1. Input
+        const input = new THREE.Vector3();
+        if(this.keys.forward) input.z -= 1;
+        if(this.keys.backward) input.z += 1;
+        if(this.keys.left) input.x -= 1;
+        if(this.keys.right) input.x += 1;
+        
+        // Camera Relative Input
+        if(input.lengthSq() > 0) {
+            input.normalize();
+            input.applyAxisAngle(new THREE.Vector3(0,1,0), this.camAngle.y);
+            
+            // Instant Turn
+            this.pFacing = Math.atan2(input.x, input.z);
+
+            // Acceleration
+            const accel = this.pOnGround ? CONFIG.PHYSICS.ACCEL : CONFIG.PHYSICS.AIR_CONTROL;
+            this.pVel.x += input.x * accel * dt;
+            this.pVel.z += input.z * accel * dt;
+        }
+
+        // 2. Friction
+        const friction = this.pOnGround ? CONFIG.PHYSICS.FRICTION_GROUND : CONFIG.PHYSICS.FRICTION_AIR;
+        const currentSpeed = new THREE.Vector2(this.pVel.x, this.pVel.z).length();
+        
+        if(currentSpeed > 0) {
+            const drop = currentSpeed * friction * dt;
+            const newSpeed = Math.max(0, currentSpeed - drop);
+            if(newSpeed !== currentSpeed) {
+                this.pVel.x *= newSpeed / currentSpeed;
+                this.pVel.z *= newSpeed / currentSpeed;
+            }
+        }
+
+        // 3. Max Speed
+        const maxS = this.keys.sprint ? CONFIG.PHYSICS.SPRINT_SPEED : CONFIG.PHYSICS.MOVE_SPEED;
+        const hVel = new THREE.Vector2(this.pVel.x, this.pVel.z);
+        if(hVel.length() > maxS) {
+            hVel.normalize().multiplyScalar(maxS);
+            this.pVel.x = hVel.x;
+            this.pVel.z = hVel.y;
+        }
+
+        // 4. Jump
+        if(this.keys.jump) {
+            if(this.pOnGround) {
+                this.pVel.y = CONFIG.PHYSICS.JUMP_FORCE;
+                this.pOnGround = false;
+                this.pJumpTimer = CONFIG.PHYSICS.VAR_JUMP_TIME;
+                this.spawnDust(this.pPos, 10);
+                this.animSquash = 0.6; // Squash
+            } else if (this.pJumpTimer > 0) {
+                this.pVel.y += CONFIG.PHYSICS.GRAVITY * 0.6 * dt; // Hold to jump higher
+                this.pJumpTimer -= dt;
+            }
+        } else {
+            this.pJumpTimer = 0;
+        }
+
+        // 5. Gravity
+        this.pVel.y -= CONFIG.PHYSICS.GRAVITY * dt;
+
+        // 6. Platform Moving
+        if(this.pOnGround) {
+            this.pPos.add(this.pPlatformVelocity.clone().multiplyScalar(dt));
+        }
+
+        // 7. Integration
+        this.prevPos.copy(this.pPos);
+        const subDt = dt / CONFIG.PHYSICS.SUBSTEPS;
+        for(let i=0; i<CONFIG.PHYSICS.SUBSTEPS; i++) {
+            this.pPos.x += this.pVel.x * subDt;
+            this.pPos.z += this.pVel.z * subDt;
+            this.pPos.y += this.pVel.y * subDt;
+            this.resolveCollisions();
+        }
+        
+        // Floor Clamp (Sea)
+        if(this.pPos.y < -10) this.respawn();
+    }
+
+    private resolveCollisions() {
+        const r = CONFIG.PHYSICS.PLAYER_RADIUS;
+        const h = CONFIG.PHYSICS.PLAYER_HEIGHT;
+        const stepMax = CONFIG.PHYSICS.STEP_HEIGHT;
+        
+        // Reset Ground flag for this substep
+        let groundHit = false;
+        this.pPlatformVelocity.set(0,0,0);
+
+        // 1. Check Tram (Moving Platform)
+        const tramBox = new THREE.Box3().setFromObject(this.tramGroup);
+        // Expand box slightly for interaction
+        tramBox.min.x -= 1; tramBox.max.x += 1; tramBox.min.z -= 1; tramBox.max.z += 1;
+        
+        if(tramBox.containsPoint(this.pPos)) {
+             // Inside Tram body? Push out.
+             // For now simple top collision
+             if(this.pPos.y >= tramBox.max.y - 1 && this.pVel.y <= 0) {
+                 this.pPos.y = tramBox.max.y;
+                 this.pVel.y = 0;
+                 groundHit = true;
+                 // Moving platform logic
+                 this.pPlatformVelocity.set(0, 0, Math.sin(this.clock.elapsedTime * 0.3) * 50); // Matches tram speed roughly
+             } else {
+                 // Push away horizontally
+                 const dx = this.pPos.x - (tramBox.min.x + tramBox.max.x)/2;
+                 if(Math.abs(dx) > 0) this.pPos.x += Math.sign(dx) * 0.1;
+             }
+        }
+
+        // 2. Static Collisions
+        // Center of Capsule
+        const center = this.pPos.clone().setY(this.pPos.y + r); // Lower sphere
+        const topCenter = this.pPos.clone().setY(this.pPos.y + h - r); // Upper sphere
+        
+        for(const box of this.colliders) {
+            if(Math.abs(box.min.x - this.pPos.x) > 30) continue; // Broadphase
+
+            // Simple Sphere vs Box for feet
+            const closest = center.clone().clamp(box.min, box.max);
+            const diff = center.clone().sub(closest);
+            const distSq = diff.lengthSq();
+            
+            if(distSq < r*r && distSq > 0.00001) {
+                const dist = Math.sqrt(distSq);
+                const pen = r - dist;
+                const norm = diff.divideScalar(dist);
+
+                // Step Handling: If hitting a wall low enough, step up
+                if(norm.y < 0.1 && (box.max.y - this.pPos.y) <= stepMax && this.pVel.y <= 0) {
+                    this.pPos.y = box.max.y;
+                    this.pVel.y = 0;
+                    groundHit = true;
+                    continue;
+                }
+                
+                // Resolve
+                this.pPos.add(norm.multiplyScalar(pen));
+                
+                // Friction/Slide against wall
+                const vn = this.pVel.dot(norm);
+                if(vn < 0) this.pVel.sub(norm.multiplyScalar(vn));
+
+                if(norm.y > 0.7) {
+                    groundHit = true;
+                    this.pVel.y = 0;
+                }
+            }
+        }
+        
+        // Ground Plane
+        if(this.pPos.y <= 0) {
+            this.pPos.y = 0;
+            this.pVel.y = Math.max(0, this.pVel.y);
+            groundHit = true;
+        }
+
+        if(groundHit) this.pOnGround = true;
+        else this.pOnGround = false;
+    }
+
+    private updateEntities(dt: number) {
+        // Tram Movement
+        const t = this.clock.elapsedTime * 0.3;
+        this.tramGroup.position.z = Math.sin(t) * 350;
+        
+        // Collectibles
+        this.collectibles.forEach(c => {
+            if(!c.active) return;
+            c.mesh.rotation.y += dt * 3;
+            if(c.mesh.position.distanceTo(this.pPos.clone().setY(c.mesh.position.y)) < 5) {
+                c.active = false;
+                c.mesh.visible = false;
                 this.score++;
-                this.onScoreUpdate(this.score, TOTAL_COLLECTIBLES);
-                this.sounds?.collect.play();
-                this.emitParticleBurst(collectible.position, 15, 0x0ea5e9);
+                this.onScoreUpdate(this.score, this.collectibles.length);
+                this.playerParts.face.set('happy');
+                setTimeout(() => this.playerParts.face.set('normal'), 1500);
             }
-        }
-    }
-    
-    /**
-     * Updates any dynamic elements in the world, like rotating collectibles.
-     */
-    private updateWorld(dt: number) {
-        this.collectibles.forEach(c => c.children[0].rotation.y += dt * 2);
-    }
-    
-    /**
-     * Creates a pool of reusable particle meshes to avoid creating new objects every frame.
-     */
-    private createParticlePool() {
-        const geo = new THREE.SphereGeometry(0.05, 4, 4);
-        const mat = new THREE.MeshBasicMaterial(); // Basic material is cheap to render.
-        for (let i = 0; i < 100; i++) {
-            const mesh = new THREE.Mesh(geo, mat);
-            this.particlePool.push(mesh);
+        });
+
+        // Blink Logic
+        if(Math.random() > 0.99) {
+            this.playerParts.face.set('blink');
+            setTimeout(() => this.playerParts.face.set('normal'), 150);
         }
     }
 
-    /**
-     * Emits a burst of particles from a specific position.
-     */
-    private emitParticleBurst(position: THREE.Vector3, count: number, color: number) {
-        for (let i = 0; i < count; i++) {
-            if (this.particlePool.length === 0) return; // Stop if pool is empty.
-            const mesh = this.particlePool.pop()!;
-            (mesh.material as THREE.MeshBasicMaterial).color.setHex(color);
-            mesh.position.copy(position);
-            mesh.scale.set(1, 1, 1);
-            this.scene.add(mesh);
-
-            const velocity = new THREE.Vector3(
-                THREE.MathUtils.randFloatSpread(5),
-                THREE.MathUtils.randFloat(2, 6),
-                THREE.MathUtils.randFloatSpread(5)
-            );
-            this.activeParticles.push({ mesh, lifetime: Math.random() * 0.8 + 0.2, velocity });
-        }
-    }
-    
-    // Emits a single dust particle for sprinting.
-    private emitSprintParticle() {
-        if (this.particlePool.length === 0 || Math.random() > 0.5) return;
-        const mesh = this.particlePool.pop()!;
-        (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xaaaaaa);
-        mesh.position.copy(this.player.position);
-        mesh.position.y -= PLAYER_HEIGHT * 0.4;
-        this.scene.add(mesh);
-        
-        const velocity = new THREE.Vector3(
-            -this.playerVelocity.x * 0.1,
-            THREE.MathUtils.randFloat(0, 1),
-            -this.playerVelocity.z * 0.1
-        );
-        this.activeParticles.push({ mesh, lifetime: 0.5, velocity });
-    }
-    
-    // Emits a single dust particle for wall sliding.
-    private emitWallSlideParticle() {
-        if (this.particlePool.length === 0 || Math.random() > 0.5) return;
-        const mesh = this.particlePool.pop()!;
-        (mesh.material as THREE.MeshBasicMaterial).color.setHex(0x888888);
-        
-        const spawnOffset = new THREE.Vector3(this.wallNormal.x, 0, this.wallNormal.z).multiplyScalar(-PLAYER_RADIUS);
-        mesh.position.copy(this.player.position).add(spawnOffset);
-        mesh.position.y += Math.random() * PLAYER_HEIGHT;
-        
-        this.scene.add(mesh);
-        
-        const velocity = new THREE.Vector3(
-            THREE.MathUtils.randFloatSpread(0.5),
-            THREE.MathUtils.randFloat(-1, -3),
-            THREE.MathUtils.randFloatSpread(0.5)
-        );
-        this.activeParticles.push({ mesh, lifetime: 0.4, velocity });
-    }
-
-    /**
-     * Updates the position, scale, and lifetime of all active particles.
-     */
     private updateParticles(dt: number) {
-        for (let i = this.activeParticles.length - 1; i >= 0; i--) {
-            const p = this.activeParticles[i];
-            p.lifetime -= dt;
-            p.velocity.y -= 5 * dt; // Simple gravity for particles.
-            p.mesh.position.addScaledVector(p.velocity, dt);
-            p.mesh.scale.multiplyScalar(0.95); // Shrink over time.
+        if(!this.particleSystem) return;
+        const { mesh, lives, vels } = this.particleSystem;
+        const dummy = new THREE.Object3D();
+        let active = 0;
 
-            if (p.lifetime <= 0) {
-                this.scene.remove(p.mesh);
-                this.particlePool.push(p.mesh); // Return to pool.
-                this.activeParticles.splice(i, 1);
+        for(let i=0; i<200; i++) {
+            if(lives[i] > 0) {
+                lives[i] -= dt * 2.0; // Fade out speed
+                
+                // Get Matrix
+                mesh.getMatrixAt(i, dummy.matrix);
+                dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
+                
+                // Move
+                dummy.position.x += vels[i*3] * dt;
+                dummy.position.y += vels[i*3+1] * dt;
+                dummy.position.z += vels[i*3+2] * dt;
+                dummy.scale.setScalar(lives[i] * 0.8);
+                
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+                active++;
+            } else {
+                dummy.scale.set(0,0,0);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
             }
+        }
+        if(active > 0) mesh.instanceMatrix.needsUpdate = true;
+    }
+
+    private rotateAttractCam(dt: number) {
+        const t = this.clock.elapsedTime * 0.15;
+        this.camera.position.set(Math.sin(t)*120, 60, Math.cos(t)*120);
+        this.camera.lookAt(0, 10, 0);
+    }
+
+    private respawn() {
+        this.lives--;
+        this.onLivesUpdate(this.lives);
+        this.pPos.set(0, 25, 0);
+        this.pVel.set(0,0,0);
+        this.prevPos.copy(this.pPos);
+    }
+
+    private render(dt: number) {
+        // 1. Visual Interpolation
+        // Since we run logic at fixed 60hz but render at 144hz+, we smooth the visual position
+        // to prevent stutter.
+        const alpha = 0.3; // Simplified smoothing
+        const renderPos = new THREE.Vector3().lerpVectors(this.playerGroup.position, this.pPos, 0.4);
+        this.playerGroup.position.copy(renderPos);
+        
+        // Rotation Smoothing
+        const targetRot = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), this.pFacing);
+        this.playerGroup.quaternion.slerp(targetRot, 15 * dt);
+
+        // Squash & Stretch
+        this.animSquash = THREE.MathUtils.lerp(this.animSquash, 1.0, 8 * dt);
+        const sy = this.animSquash;
+        const sxz = 1 + (1-sy)*0.5;
+        this.playerParts.root.scale.set(2.5*sxz, 2.5*sy, 2.5*sxz);
+
+        // Procedural Animation (Legs)
+        const speed = new THREE.Vector2(this.pVel.x, this.pVel.z).length();
+        if(this.pOnGround && speed > 0.5) {
+             if(this.particleSystem && Math.random() > 0.9) this.spawnDust(this.pPos, 1);
+             
+             const t = this.clock.elapsedTime * speed * 0.4;
+             const lift = 0.5;
+             const stride = 0.4;
+             
+             const limbs = this.playerParts.limbs;
+             limbs.fl.position.y = Math.max(0, Math.sin(t)*lift);
+             limbs.fl.position.z = Math.cos(t)*stride - 0.2;
+             
+             limbs.br.position.y = Math.max(0, Math.sin(t)*lift);
+             limbs.br.position.z = Math.cos(t)*stride + 0.2;
+             
+             limbs.fr.position.y = Math.max(0, Math.sin(t + Math.PI)*lift);
+             limbs.fr.position.z = Math.cos(t + Math.PI)*stride + 0.2;
+             
+             limbs.bl.position.y = Math.max(0, Math.sin(t + Math.PI)*lift);
+             limbs.bl.position.z = Math.cos(t + Math.PI)*stride - 0.2;
+             
+             // Body Roll
+             this.playerParts.root.rotation.z = -this.pVel.x * 0.005;
+             // Tail Sway
+             this.playerParts.tail.rotation.y = Math.sin(t)*0.6;
+        } else {
+             // Reset
+             this.playerParts.root.rotation.z *= 0.9;
+             // Tail Idle
+             this.playerParts.tail.rotation.y = Math.sin(this.clock.elapsedTime)*0.2;
+             // Legs Idle
+             Object.values(this.playerParts.limbs as { [key: string]: THREE.Mesh }).forEach((l: THREE.Mesh) => {
+                 l.position.y = THREE.MathUtils.lerp(l.position.y, 0, 10*dt);
+             });
+        }
+
+        // Shadow
+        this.playerParts.shadow.position.copy(renderPos);
+        this.playerParts.shadow.position.y = 0.1;
+
+        // Camera Logic (Spring Arm with Occlusion)
+        const target = renderPos.clone().add(new THREE.Vector3(0, 4, 0));
+        
+        // Desired position based on angle
+        const offset = new THREE.Vector3(0, CONFIG.CAMERA.HEIGHT, CONFIG.CAMERA.DISTANCE);
+        offset.applyAxisAngle(new THREE.Vector3(0,1,0), this.camAngle.y);
+        
+        // Collision Check for Camera
+        // Raycast from target -> desired position
+        const dir = offset.clone().normalize();
+        const maxDist = offset.length();
+        const ray = new THREE.Raycaster(target, dir, 0, maxDist);
+        
+        // We need to raycast against building geometry.
+        // For performance, we just clamp 'desired' dist if it hits a box.
+        // Simple approach: Check all boxes? No, too slow.
+        // Optimization: Only check boxes within distance.
+        let finalDist = maxDist;
+        
+        // Only check large boxes near camera
+        for(const b of this.colliders) {
+             if(b.containsPoint(target)) continue; // Inside building? ignore
+             const intersection = ray.ray.intersectBox(b, new THREE.Vector3());
+             if(intersection) {
+                 const d = intersection.distanceTo(target);
+                 if(d < finalDist) finalDist = Math.max(d - CONFIG.CAMERA.COLLISION_OFFSET, 5);
+             }
+        }
+        
+        const finalPos = target.clone().add(dir.multiplyScalar(finalDist));
+        this.camera.position.lerp(finalPos, CONFIG.CAMERA.SMOOTH * dt);
+        this.camera.lookAt(target);
+        
+        this.composer.render();
+    }
+
+    public setRunning(r: boolean) {
+        this.running = r;
+        if(r) {
+            this.reset();
+            this.canvas.requestPointerLock();
         }
     }
 
-    /**
-     * The main game loop, called by `requestAnimationFrame`.
-     */
-    private animate = () => {
-        this.animationFrameId = requestAnimationFrame(this.animate);
-        const dt = Math.min(this.clock.getDelta(), 0.05); // Get delta time and cap it to prevent physics bugs.
-        this.update(dt);
-        this.composer.render(); // Render the scene through the post-processing composer.
-    };
+    public reset() {
+        this.lives = 9;
+        this.score = 0;
+        this.pPos.set(0, 10, 0);
+        this.pVel.set(0,0,0);
+        this.pOnGround = false;
+        this.collectibles.forEach(c => {c.active=true; c.mesh.visible=true});
+        this.onScoreUpdate(0, this.collectibles.length);
+        this.onLivesUpdate(9);
+    }
 
-    // --- EVENT HANDLERS & PUBLIC METHODS ---
+    public updateControls(c: PlayerControls) { this.keys = c; }
+    
+    private onMouseMove = (e: MouseEvent) => {
+        if(this.running && document.pointerLockElement === this.canvas) {
+            this.camAngle.y -= e.movementX * 0.002;
+            this.camAngle.x -= e.movementY * 0.002;
+        }
+    }
 
-    private onWindowResize = () => {
-        this.camera.aspect = window.innerWidth / window.innerHeight;
+    private onResize = () => {
+        this.camera.aspect = window.innerWidth/window.innerHeight;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.composer.setSize(window.innerWidth, window.innerHeight);
-    };
+    }
 
-    private onMouseMove = (event: MouseEvent) => {
-        if(!this.isRunning) return;
-        // Update spherical coordinates based on mouse movement.
-        this.cameraSpherical.theta -= event.movementX * MOUSE_SENSITIVITY;
-        this.cameraSpherical.phi -= event.movementY * MOUSE_SENSITIVITY;
-        this.cameraSpherical.phi = Math.max(CAMERA_MIN_PHI, Math.min(CAMERA_MAX_PHI, this.cameraSpherical.phi));
-    };
-
-    private onPointerLockError = () => {
-        console.warn("Could not lock pointer: request denied or failed.");
-    };
-
-    /**
-     * Cleans up resources when the game is destroyed.
-     */
     public dispose() {
-        cancelAnimationFrame(this.animationFrameId);
-        window.removeEventListener('resize', this.onWindowResize);
-        document.removeEventListener('mousemove', this.onMouseMove);
-        document.removeEventListener('pointerlockerror', this.onPointerLockError);
+        cancelAnimationFrame(this.frameId);
         this.renderer.dispose();
+        window.removeEventListener('resize', this.onResize);
+        document.removeEventListener('mousemove', this.onMouseMove);
     }
-
-    /**
-     * Toggles the game's running state and handles pointer lock.
-     */
-    public setRunning(isRunning: boolean) {
-        this.isRunning = isRunning;
-        if(isRunning) {
-            this.initAudio();
-            this.canvas.requestPointerLock();
-        } else {
-            if (document.pointerLockElement === this.canvas) {
-                document.exitPointerLock();
-            }
-            if(this.sounds?.wallSlide.played) this.sounds.wallSlide.pause();
-        }
-    }
-
-    /**
-     * Called by the React component to update the player's controls state.
-     */
-    public updateControls(controls: PlayerControls) { this.playerControls = controls; }
 }

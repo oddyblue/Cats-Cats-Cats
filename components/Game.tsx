@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { ThreeGame } from '../services/ThreeGame';
 import { usePlayerControls } from '../hooks/usePlayerControls';
@@ -14,69 +15,147 @@ const Game: React.FC<GameProps> = ({ nickname, isRunning }) => {
   const controls = usePlayerControls(isRunning);
 
   const [score, setScore] = useState(0);
-  const [totalCollectibles, setTotalCollectibles] = useState(0);
-  const [gameWon, setGameWon] = useState(false);
+  const [lives, setLives] = useState(9);
+  const [gameState, setGameState] = useState<'playing' | 'won' | 'lost'>('playing');
+  const [totalCollectibles, setTotalCollectibles] = useState(999);
 
   const handleScoreUpdate = useCallback((newScore: number, total: number) => {
     setScore(newScore);
-    if (totalCollectibles === 0 && total > 0) {
-      setTotalCollectibles(total);
+    setTotalCollectibles(total);
+    if (total > 0 && newScore >= total) {
+        setGameState('won');
+        if (gameInstance.current) gameInstance.current.setRunning(false);
     }
-    if (newScore === total && total > 0) {
-      setGameWon(true);
+  }, []);
+
+  const handleLivesUpdate = useCallback((remainingLives: number) => {
+    setLives(remainingLives);
+    if (remainingLives <= 0) {
+        setGameState('lost');
+        if (gameInstance.current) gameInstance.current.setRunning(false);
     }
-  }, [totalCollectibles]);
+  }, []);
 
-
+  // Init Game
   useEffect(() => {
-    if (canvasRef.current && !gameInstance.current) {
-      gameInstance.current = new ThreeGame(canvasRef.current);
-      gameInstance.current.onScoreUpdate = handleScoreUpdate;
-      gameInstance.current.init();
-      
-      return () => {
-        gameInstance.current?.dispose();
+    if (!canvasRef.current || gameInstance.current) return;
+    
+    const game = new ThreeGame(canvasRef.current);
+    game.onScoreUpdate = handleScoreUpdate;
+    game.onLivesUpdate = handleLivesUpdate;
+    gameInstance.current = game;
+    
+    return () => {
+        game.dispose();
         gameInstance.current = null;
-      };
-    }
-  }, [handleScoreUpdate]);
+    };
+  }, []);
 
+  // Game State Sync
+  useEffect(() => {
+    const game = gameInstance.current;
+    if (!game) return;
+
+    if (isRunning) {
+        if (gameState !== 'playing') {
+            game.resetGame();
+            setGameState('playing');
+        }
+        game.setRunning(true);
+        // Delay focus to ensure overlay is gone
+        setTimeout(() => canvasRef.current?.focus(), 100);
+    } else {
+        game.setRunning(false);
+    }
+  }, [isRunning, gameState]);
+
+  // Controls Sync
   useEffect(() => {
     if (gameInstance.current) {
-      gameInstance.current.setRunning(isRunning);
-      if (isRunning && gameWon) {
-        // Reset win state if starting a new game
-        setGameWon(false);
-      }
-    }
-  }, [isRunning, gameWon]);
-
-  useEffect(() => {
-    if (gameInstance.current) {
-      gameInstance.current.updateControls(controls);
+        gameInstance.current.updateControls(controls);
     }
   }, [controls]);
 
+  const handleRetry = () => {
+      setGameState('playing');
+      if (gameInstance.current) {
+          gameInstance.current.resetGame();
+          gameInstance.current.setRunning(true);
+      }
+  };
 
   return (
-    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%' }}>
-        <div 
-          className={`absolute top-5 left-5 text-white z-10 bg-black/50 p-2.5 rounded-md font-sans transition-opacity duration-500 ${isRunning ? 'opacity-100' : 'opacity-0'}`}
-        >
-            <p>Playing as: <strong>{nickname}</strong></p>
-            <p>Fish Collected: <strong>{score} / {totalCollectibles}</strong></p>
-        </div>
-        <ControlsGuide isRunning={isRunning} />
-        <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
+    <div className="fixed inset-0 w-full h-full bg-gray-900 select-none font-sans text-white overflow-hidden">
+        <canvas ref={canvasRef} className="block w-full h-full outline-none cursor-none" tabIndex={0} />
 
-        {/* Win Screen Overlay */}
-        {gameWon && (
-          <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-20 text-white font-sans animate-fade-in">
-            <h2 className="text-6xl font-black text-brand-orange mb-4">YOU WIN!</h2>
-            <p className="text-2xl text-gray-200">You collected all the fish in Istanbul!</p>
-            <p className="text-lg mt-2">A true master of the rooftops.</p>
-             <p className="text-sm text-gray-400 mt-8">Reload the page to play again.</p>
-          </div>
+        {/* HUD */}
+        <div className={`absolute top-0 left-0 right-0 p-8 flex justify-between items-start transition-all duration-700 ${isRunning && gameState === 'playing' ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'}`}>
+            
+            {/* Player Identity */}
+            <div className="flex flex-col">
+                <h2 className="text-2xl font-black tracking-tight text-white drop-shadow-md">{nickname}</h2>
+                <div className="text-white/60 text-xs font-medium tracking-widest uppercase mt-1">Istanbul Explorer</div>
+            </div>
+
+            {/* Status Panel */}
+            <div className="flex gap-8 bg-black/20 backdrop-blur-md p-4 rounded-2xl border border-white/5">
+                {/* Hearts */}
+                <div className="flex flex-col items-end">
+                    <div className="flex gap-1 mb-1">
+                         {Array.from({length: 9}).map((_, i) => (
+                            <div 
+                                key={i} 
+                                className={`w-2 h-6 rounded-sm transition-all duration-300 ${i < lives ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.6)]' : 'bg-white/10'}`} 
+                            />
+                        ))}
+                    </div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-white/60">Lives</span>
+                </div>
+
+                {/* Score */}
+                <div className="flex flex-col items-end">
+                    <div className="text-3xl font-black tabular-nums leading-none text-brand-orange drop-shadow-sm">
+                        {score}<span className="text-white/20 text-lg">/{totalCollectibles}</span>
+                    </div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-white/60">Simits</span>
+                </div>
+            </div>
+        </div>
+
+        <ControlsGuide isRunning={isRunning && gameState === 'playing'} />
+
+        {/* Overlay Screens */}
+        {gameState !== 'playing' && isRunning && (
+             <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center animate-fade-in">
+                <div className="text-center max-w-md w-full p-12 bg-white/5 border border-white/10 rounded-3xl shadow-2xl transform scale-100">
+                    <div className="text-8xl mb-8 animate-bounce">
+                        {gameState === 'won' ? '😺' : '😿'}
+                    </div>
+                    <h2 className="text-4xl font-bold mb-2 text-white">
+                        {gameState === 'won' ? 'Purr-fect!' : 'Game Over'}
+                    </h2>
+                    <p className="text-white/60 mb-8">
+                        {gameState === 'won' 
+                            ? "You conquered the streets of Kadıköy!" 
+                            : "Ran out of lives... Time for a cat nap."}
+                    </p>
+                    
+                    <div className="space-y-3">
+                        <button 
+                            onClick={handleRetry} 
+                            className="w-full py-4 bg-brand-orange text-white font-bold rounded-xl hover:scale-[1.02] transition-transform uppercase tracking-wider text-sm shadow-lg"
+                        >
+                            Try Again
+                        </button>
+                        <button 
+                            onClick={() => window.location.reload()} 
+                            className="w-full py-4 text-white/40 hover:text-white transition-colors text-xs uppercase tracking-widest"
+                        >
+                            Exit
+                        </button>
+                    </div>
+                </div>
+             </div>
         )}
     </div>
   );

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import { PlayerControls } from '../types';
 
-export const usePlayerControls = (enabled: boolean) => {
-  const [movement, setMovement] = useState({
+export const usePlayerControls = (enabled: boolean): PlayerControls => {
+  const [movement, setMovement] = useState<PlayerControls>({
     forward: false,
     backward: false,
     left: false,
